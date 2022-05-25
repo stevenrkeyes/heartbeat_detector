@@ -1,107 +1,92 @@
-/******************************************************************************
-Heart_Rate_Display.ino
-Demo Program for AD8232 Heart Rate sensor.
-Casey Kuhns @ SparkFun Electronics
-6/27/2014
-https://github.com/sparkfun/AD8232_Heart_Rate_Monitor
-
-The AD8232 Heart Rate sensor is a low cost EKG/ECG sensor.  This example shows
-how to create an ECG with real time display.  The display is using Processing.
-This sketch is based heavily on the Graphing Tutorial provided in the Arduino
-IDE. http://www.arduino.cc/en/Tutorial/Graph
-
-Resources:
-This program requires a Processing sketch to view the data in real time.
-
-Development environment specifics:
-	IDE: Arduino 1.0.5
-	Hardware Platform: Arduino Pro 3.3V/8MHz
-	AD8232 Heart Monitor Version: 1.0
-
-This code is beerware. If you see me (or any other SparkFun employee) at the
-local pub, and you've found our code helpful, please buy us a round!
-
-Distributed as-is; no warranty is given.
-******************************************************************************/
-
 #include <CircularBuffer.h>
 #include <SoftPWM.h>
 
 
 #define LED_PIN LED_BUILTIN
 
+// Period after detection of an R-peak to wait before further detections are allowed
 #define COOLDOWN_MS 500
 
-long beat_detected_time_ms;
+// System time of the last detected R-peak
+long beat_detected_time_ms = 0;
 
-void led_heartbeat(uint8_t led_pin, long start_time_ms) {
-  int fade_value;
-  long current_time_ms = millis();
-  long elapsed_time_ms = current_time_ms - start_time_ms;
-
-  if (elapsed_time_ms < 100) {
-    fade_value = (int)elapsed_time_ms;
-  } else if (elapsed_time_ms < 200) {
-    fade_value = 100 - (elapsed_time_ms - 100);
-  } else if (elapsed_time_ms < 250) {
-    fade_value = 0;
-  } else if (elapsed_time_ms < 290) {
-    fade_value = elapsed_time_ms - 250;
-  } else if (elapsed_time_ms < 330) {
-    fade_value = 40 - (elapsed_time_ms - 290);
-  } else {
-    fade_value = 0;
-  }
-  
-  SoftPWMSet(led_pin, fade_value);
-}
+// Buffers for digital filtering
+#define PAST_RAW_MEASUREMENTS_SIZE 50
+#define PAST_FILTERED_MEASUREMENTS_SIZE 200
+CircularBuffer<int, PAST_RAW_MEASUREMENTS_SIZE> past_raw_measurements;
+CircularBuffer<float, PAST_FILTERED_MEASUREMENTS_SIZE> past_filtered_measurements;
+float filtered_measurement = 0;
 
 void setup() {
   // initialize the serial communication:
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   pinMode(LED_PIN, OUTPUT);
-  SoftPWMBegin();
-  SoftPWMSetFadeTime(LED_PIN, 0, 0);
-  SoftPWMSet(LED_PIN, 0);
 
-  beat_detected_time_ms = 0;
+  // Initialize all buffers to 0s
+  for (int index = 0; index < PAST_RAW_MEASUREMENTS_SIZE; index++) {
+    past_raw_measurements.push(0);
+  }
+  for (int index = 0; index < PAST_FILTERED_MEASUREMENTS_SIZE; index++) {
+    past_filtered_measurements.push(0);
+  }
 }
 
-float filtered_measurement = 0;
-float filtered_measurement_high = 0;
-float filtered_measurement_low = 0;
+// Detects an r-peak in the filtered data based on whether it is >90% of the previous data (mean removed), as long as it is long enough since the previous peak
+// Todo: fix this, it is too slow. Probably remove the mean calculation and make the FIR filter be a IIR bandpass. Or maybe use integer math for the mean calculation.
+//   Also, replace the max sample calculation with something faster, such as a circular buffer that tracks which index is the max.
+bool is_r_peak() {
+  long candidate_beat_detected_time_ms = millis();
+  if (candidate_beat_detected_time_ms - beat_detected_time_ms < COOLDOWN_MS) {
+    return false;
+  }
+     
+  // Calculate mean
+  float filtered_measurement_total = 0;
+  for (int index = 0; index < PAST_FILTERED_MEASUREMENTS_SIZE; index++){
+    filtered_measurement_total += past_filtered_measurements[index];
+  }
+  float filtered_measurement_mean = filtered_measurement_total / PAST_FILTERED_MEASUREMENTS_SIZE;
 
-CircularBuffer<float, 200> past_samples;
+  // Calculate max sample
+  float max_sample = 0;
+  for (int index = 0; index < PAST_FILTERED_MEASUREMENTS_SIZE; index++){
+    if (past_filtered_measurements[index] > max_sample) {
+      max_sample = past_filtered_measurements[index];
+    }
+  }
+
+  float max_sample_minus_mean = max_sample - filtered_measurement_mean;
+  float filtered_measurement_minus_mean = filtered_measurement - filtered_measurement_mean;
+
+  if (filtered_measurement_minus_mean > 0.90 * max_sample_minus_mean) {
+    beat_detected_time_ms = candidate_beat_detected_time_ms;
+    return true;
+  }
+  return false;
+}
 
 void loop() {
 
   int raw_measurement = analogRead(A0);
   
-  // Do a little bit of digital high- and low- pass filtering
-  filtered_measurement_high = 0.8 * filtered_measurement_high + 0.2 * raw_measurement;
-  filtered_measurement_low = 0.99 * filtered_measurement_low + 0.01 * raw_measurement;
-  filtered_measurement = filtered_measurement_high - filtered_measurement_low;
-
-  past_samples.push(filtered_measurement);
-  float max_sample = 0;
-  for (int index = 0; index < past_samples.size(); index++){
-    if (past_samples[index] > max_sample) {
-      max_sample = past_samples[index];
-    }
-  }
-
-  if (filtered_measurement > 0.9 * max_sample) {
-     long candidate_beat_detected_time_ms = millis();
-     if (candidate_beat_detected_time_ms - beat_detected_time_ms > COOLDOWN_MS) {
-       beat_detected_time_ms = candidate_beat_detected_time_ms;
-     }
-  }
+  past_raw_measurements.push(raw_measurement);
   
-  led_heartbeat(LED_PIN, beat_detected_time_ms);
-
+  // FIR filter: lowpass at 25 Hz, 20 taps
+  filtered_measurement = -0.00162832 * past_raw_measurements[0] + -0.0008381586 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-1] + 0.001602399 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-2] + 0.00857948 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-3] + 0.02247107 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-4] + 0.04384433 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-5] + 0.0706881 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-6] + 0.09857132 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-7] + 0.1217617 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-8] + 0.1349481 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-9] + 0.1349481 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-10] + 0.1217617 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-11] + 0.09857132 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-12] + 0.0706881 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-13] + 0.04384433 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-14] + 0.02247107 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-15] + 0.00857948 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-16] + 0.001602399 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-17] + -0.0008381586 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-18] + -0.00162832 * past_raw_measurements[PAST_RAW_MEASUREMENTS_SIZE-19];  past_filtered_measurements.push(filtered_measurement);
+  
   Serial.println(filtered_measurement);
-  
+
+  past_filtered_measurements.push(filtered_measurement);
+
+  // Check if this is a heartbeat
+  if (is_r_peak()) {
+    digitalWrite(LED_PIN, HIGH);
+  } else {
+    digitalWrite(LED_PIN, LOW);
+  }
+
+
   //Wait for a bit to keep serial data from saturating
   delay(1);
 }
