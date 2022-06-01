@@ -2,7 +2,7 @@ import scipy.signal as signal
 import numpy as np
 
 # Number of coefficients to use -- must be odd
-num_coefficients = 3
+num_coefficients = 5
 
 # Sampling frequency -- must be enforced by the microcontroller
 sampling_frequency_hz = 1000
@@ -29,6 +29,15 @@ filter_order = (num_coefficients - 1) / 2
 b_coefficients, a_coefficients = signal.iirfilter(filter_order, frequencies_hz, btype=band_type, fs=sampling_frequency_hz)
 
 from matplotlib import pyplot as plt
+
+frequencies_rad_normalized, frequency_responses = signal.freqz(b_coefficients, a_coefficients, worN=8000)
+plottable_frequencies_hz = frequencies_rad_normalized * sampling_frequency_hz / (2 * np.pi)
+plt.plot(plottable_frequencies_hz, np.absolute(frequency_responses))
+plt.title("Frequency Response of Generated Filter")
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Gain")
+plt.show()
+
 z, p, gain = signal.iirfilter(filter_order, frequencies_hz, output="zpk", btype=band_type, fs=sampling_frequency_hz)
 plt.plot(np.real(z), np.imag(z), 'ob', markerfacecolor='none')
 plt.plot(np.real(p), np.imag(p), 'xr')
@@ -50,10 +59,8 @@ def get_contribution_strings(coefficients, name_of_buffer, name_of_size_of_buffe
     contribution_strings = []
     for coefficient_index, coefficient in enumerate(coefficients):
         if coefficient != 0:
-            if coefficient_index == 0:
-                buffer_index_string = "0"
-            else:
-                buffer_index_string = name_of_size_of_buffer + " - " + str(coefficient_index)
+            # buffer[len-1] is the most recent sample, buffer[len-2] is the 2nd most recent, etc.
+            buffer_index_string = name_of_size_of_buffer + " - " + str(coefficient_index + 1)
             # 32-bit floats only require at most 7 significant figures
             coefficient_rounded = round_to_n_significant_figures(coefficient, 7)
             contribution_string = str(coefficient_rounded) + " * "
@@ -66,7 +73,7 @@ b_contribution_strings = get_contribution_strings(b_coefficients, name_of_raw_me
 # Also, negate them since they will need to be negated per their form
 a_contribution_strings = get_contribution_strings(-a_coefficients[1:], name_of_filtered_measurements_buffer, name_of_size_of_filtered_measurments_buffer)
 
-c_code = ""
+c_code = "// IIR filter: " + band_type + " at " + " and ".join([str(f) for f in frequencies_hz]) + "Hz, " + str(num_coefficients) + " taps\n"
 c_code = c_code + name_of_filtered_measurement_variable + " = "
 c_code += " + ".join(b_contribution_strings)
 c_code += " + "
@@ -74,5 +81,6 @@ c_code += " + ".join(a_contribution_strings)
 c_code += ";"
 
 print(c_code)
+print()
 print(b_coefficients)
 print(a_coefficients)

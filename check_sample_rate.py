@@ -3,9 +3,9 @@ import time
 import numpy as np
 from matplotlib import pyplot as plt
 
-port = "COM4"
+port = "COM5"
 
-serial_device = serial.Serial(port="COM4", baudrate=115200)
+serial_device = serial.Serial(port=port, baudrate=115200)
 
 # Clear the buffer if there is one
 # This might also just be resetting the Arduino fwiw
